@@ -1767,5 +1767,3 @@ if __name__ == "__main__":
     sys.exit(app.exec_())
 
 [end of main.py]
-
-[end of main.py]
