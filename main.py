@@ -1765,5 +1765,3 @@ if __name__ == "__main__":
     
     # Start the Qt event loop; sys.exit() ensures a clean exit code is returned
     sys.exit(app.exec_())
-
-[end of main.py]
