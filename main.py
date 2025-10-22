@@ -67,9 +67,10 @@ class TransparentOverlay(QWidget):
     closed = pyqtSignal(QWidget)
 
     def __init__(self, time_to_full_size, transparency, color, initial_size,
-                 max_pixels_per_step, exit_after, text, text_transparency, text_color, alert, screen=None):
+                 max_pixels_per_step, exit_after, text, text_transparency, text_color, alert, start_corner, screen=None):
         super().__init__()
         self.alert = alert # Store the alert data associated with this overlay
+        self.start_corner = start_corner # Store the starting corner
         self.current_width = initial_size
         self.current_height = initial_size
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool | Qt.WindowTransparentForInput)
@@ -82,8 +83,20 @@ class TransparentOverlay(QWidget):
         self.screen_x = screen_geometry.x()
         self.screen_y = screen_geometry.y()
 
-        initial_x = self.screen_x + self.screen_width - self.current_width
-        initial_y = self.screen_y
+        # Calculate initial position based on the start corner
+        if self.start_corner == "Top-Left":
+            initial_x = self.screen_x
+            initial_y = self.screen_y
+        elif self.start_corner == "Bottom-Left":
+            initial_x = self.screen_x
+            initial_y = self.screen_y + self.screen_height - self.current_height
+        elif self.start_corner == "Bottom-Right":
+            initial_x = self.screen_x + self.screen_width - self.current_width
+            initial_y = self.screen_y + self.screen_height - self.current_height
+        else: # Default to "Top-Right"
+            initial_x = self.screen_x + self.screen_width - self.current_width
+            initial_y = self.screen_y
+        
         self.setGeometry(int(initial_x), int(initial_y), int(self.current_width), int(self.current_height))
 
         self.overlay_color = tuple(color) if isinstance(color, list) else color
@@ -123,8 +136,21 @@ class TransparentOverlay(QWidget):
             self.current_width = min(self.current_width, self.target_width) if self.width_increment >= 0 else max(self.current_width, self.target_width)
             self.current_height = min(self.current_height, self.target_height) if self.height_increment >= 0 else max(self.current_height, self.target_height)
 
-        new_x = self.screen_x + self.screen_width - self.current_width
-        self.setGeometry(int(new_x), self.screen_y, int(self.current_width), int(self.current_height))
+        # Calculate new position based on the start corner and current size
+        if self.start_corner == "Top-Left":
+            new_x = self.screen_x
+            new_y = self.screen_y
+        elif self.start_corner == "Bottom-Left":
+            new_x = self.screen_x
+            new_y = self.screen_y + self.screen_height - self.current_height
+        elif self.start_corner == "Bottom-Right":
+            new_x = self.screen_x + self.screen_width - self.current_width
+            new_y = self.screen_y + self.screen_height - self.current_height
+        else: # Default to "Top-Right"
+            new_x = self.screen_x + self.screen_width - self.current_width
+            new_y = self.screen_y
+
+        self.setGeometry(int(new_x), int(new_y), int(self.current_width), int(self.current_height))
         self.update()
 
         if self.current_width == self.target_width and self.current_height == self.target_height:
@@ -233,6 +259,12 @@ class AddAlertDialog(QDialog):
         self.display_combo.setCurrentText(edit_data.get('display', self.default_settings.get('default_display', 'Main')))
         self.form_layout.addRow("Display On:", self.display_combo)
 
+        # Start Corner
+        self.start_corner_combo = QComboBox()
+        self.start_corner_combo.addItems(["Top-Right", "Top-Left", "Bottom-Left", "Bottom-Right"])
+        self.start_corner_combo.setCurrentText(edit_data.get('start_corner', self.default_settings.get('default_start_corner', 'Top-Right')))
+        self.form_layout.addRow("Start Corner:", self.start_corner_combo)
+
         # OK/Cancel Buttons
         self.button_layout = QHBoxLayout()
         self.ok_button = QPushButton("OK"); self.cancel_button = QPushButton("Cancel")
@@ -289,6 +321,7 @@ class AddAlertDialog(QDialog):
             'repeat': repeat_mode,
             'text': self.text_edit.text(),
             'display': self.display_combo.currentText(),
+            'start_corner': self.start_corner_combo.currentText(),
             'expansion_time': self.expansion_time_edit.value(),
             'duration_multiplier': self.duration_multiplier_edit.value(),
             'start_size': self.start_size_edit.value(),
@@ -361,6 +394,12 @@ class SettingsDialog(QDialog):
         self.default_display_combo.setCurrentText(self.settings.get('default_display', 'Main'))
         form_layout.addRow("Default Display On:", self.default_display_combo)
 
+        # Default Start Corner
+        self.default_start_corner_combo = QComboBox()
+        self.default_start_corner_combo.addItems(["Top-Right", "Top-Left", "Bottom-Left", "Bottom-Right"])
+        self.default_start_corner_combo.setCurrentText(self.settings.get('default_start_corner', 'Top-Right'))
+        form_layout.addRow("Default Start Corner:", self.default_start_corner_combo)
+
         # Max Pixels Per Step
         self.max_pixels_per_step_edit = QSpinBox()
         self.max_pixels_per_step_edit.setRange(1, 1000)
@@ -409,10 +448,11 @@ class SettingsDialog(QDialog):
             'default_overlay_color': self.default_overlay_color,
             'default_text_color': self.default_text_color,
             'default_display': self.default_display_combo.currentText(),
+            'default_start_corner': self.default_start_corner_combo.currentText(),
             'max_pixels_per_step': self.max_pixels_per_step_edit.value(),
         }
 
-# --- Main Window Class --- (Includes Fix 1 & 2, Reverted Tray Icon Creation)
+# --- Main Window Class ---
 
 class MainWindow(QMainWindow):
     REG_PATH = r"Software\Microsoft\Windows\CurrentVersion\Run"
@@ -447,14 +487,14 @@ class MainWindow(QMainWindow):
         self.alerts = []
         self.overlays = set() # Use set for active overlays
         self.alert_timers = {} # {alert_index: QTimer} for regular scheduled alerts
-        self.temporary_timers = set() # <-- FIX 2: Store temporary delay timers here
+        self.temporary_timers = set()
 
         # Load settings and alerts
         self.settings = self.load_settings()
         self.load_alerts() # Loads alerts and sets initial timers
 
         # System Tray
-        self.create_tray_icon() # Calls the reverted method below
+        self.create_tray_icon()
         self.tray_icon.showMessage("Gentle Alert Scheduler", "Application started.", QSystemTrayIcon.Information, 3000)
 
         # Startup Check (Windows only)
@@ -470,7 +510,6 @@ class MainWindow(QMainWindow):
     
             if icon_path.is_file():
                 self.tray_icon.setIcon(QIcon(icon_path_str))
-                # print(f"Loaded tray icon from: {icon_path_str}") # Optional: for debugging
             else:
                 print(f"Tray icon file not found at resolved path: {icon_path_str}")
                 self.tray_icon.setIcon(self.style().standardIcon(QStyle.SP_ComputerIcon))
@@ -495,8 +534,6 @@ class MainWindow(QMainWindow):
         self.tray_icon.activated.connect(self.on_tray_icon_activated)
         self.tray_icon.show()
 
-
-    # --- FIX 1 & 2 Applied Here ---
     def delay_alerts(self, minutes):
         """Stops currently active overlays and schedules temporary replacements."""
         if not self.overlays:
@@ -508,7 +545,7 @@ class MainWindow(QMainWindow):
         active_alerts_data_to_reschedule = [overlay.alert for overlay in active_overlays_list]
         print(f"Delaying {len(active_overlays_list)} active overlay instance(s) by {minutes} minutes.")
 
-        # --- FIX 1: Calculate unique logical alerts ---
+        # Calculate unique logical alerts
         unique_alert_ids = set()
         unique_alerts_data_map = {} # Store the actual alert data keyed by ID
         for alert_data in active_alerts_data_to_reschedule:
@@ -527,7 +564,6 @@ class MainWindow(QMainWindow):
                  print(f"Warning: Could not reliably serialize alert data for uniqueness check: {alert_data}")
 
         num_unique_alerts = len(unique_alert_ids)
-        # --- End FIX 1 Calculation ---
 
         # Stop the visual overlays silently
         self.stop_ongoing_alerts(silent=True)
@@ -544,16 +580,13 @@ class MainWindow(QMainWindow):
             temp_alert['repeat'] = 'No Repeat' # Delayed alerts don't repeat
             temp_alert['enabled'] = True
             print(f"  Scheduling temporary alert: {temp_alert.get('text', 'No Text')} at {temp_alert['time']}")
-            # --- FIX 2: Use _schedule_single_alert_instance which now stores the timer ---
             self._schedule_single_alert_instance(temp_alert, is_temporary=True)
 
-        # --- FIX 1: Use the count of unique alerts for the message ---
         self.tray_icon.showMessage(
             "Delay Alerts",
             f"Delayed {num_unique_alerts} unique alert(s) by {minutes} minutes.",
             QSystemTrayIcon.Information, 3000
         )
-        # --- End FIX 1 Message ---
 
     def show_main_window(self):
         self.show(); self.raise_(); self.activateWindow()
@@ -586,7 +619,6 @@ class MainWindow(QMainWindow):
             # For running as script, get absolute path
             return os.path.abspath(sys.argv[0])
 
-
     def check_startup_status(self):
         if not winreg: return # Skip if winreg failed to import
         exe_path = self.get_executable_path()
@@ -604,13 +636,13 @@ class MainWindow(QMainWindow):
             print("Startup entry not found.")
             self.ask_add_to_startup()
         except Exception as e:
-            QMessageBox.warning(self, "Startup Check Error", f"Failed to check startup status:\n{e}")
+            QMessageBox.warning(None, "Startup Check Error", f"Failed to check startup status:\n{e}")
 
     def ask_add_to_startup(self, update=False):
         if not winreg: return
         question = ('Path changed. Update startup entry?' if update else 'Run Gentle Alert Scheduler at system startup?')
         title = 'Update Startup' if update else 'Add to Startup'
-        reply = QMessageBox.question(self, title, question, QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        reply = QMessageBox.question(None, title, question, QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
         if reply == QMessageBox.Yes: self.manage_startup_entry(add=True)
 
     def manage_startup_entry(self, add=True):
@@ -630,17 +662,16 @@ class MainWindow(QMainWindow):
                  except FileNotFoundError:
                      action_msg = "not found in startup (no removal needed)"
             winreg.CloseKey(key)
-            QMessageBox.information(self, "Startup Success", f"Application {action_msg}.")
+            QMessageBox.information(None, "Startup Success", f"Application {action_msg}.")
             print(f"Startup entry {action_msg}: {self.APP_NAME} -> \"{exe_path}\"")
             return True
         except PermissionError:
-             QMessageBox.warning(self, "Startup Error", "Permission denied. Could not modify startup settings.\nTry running as administrator if needed.")
+             QMessageBox.warning(None, "Startup Error", "Permission denied. Could not modify startup settings.\nTry running as administrator if needed.")
              return False
         except Exception as e:
             action = "add/update" if add else "remove"
-            QMessageBox.warning(self, "Startup Error", f"Failed to {action} startup entry:\n{e}")
+            QMessageBox.warning(None, "Startup Error", f"Failed to {action} startup entry:\n{e}")
             return False
-
 
     # --- Alert Management Dialogs ---
     def open_add_alert_dialog(self):
@@ -673,7 +704,7 @@ class MainWindow(QMainWindow):
             reply = QMessageBox.question(self, "Confirm Removal", f"Remove alert: '{self.alerts[selected_row].get('text','(No Text)')}'?", QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
             if reply == QMessageBox.Yes:
                 self.stop_alert_timer(selected_row) # Stop timer associated with this index
-                removed_alert = self.alerts.pop(selected_row)
+                self.alerts.pop(selected_row)
                 print(f"Removed alert index {selected_row}")
 
                 # --- IMPORTANT: Re-index timers ---
@@ -690,7 +721,6 @@ class MainWindow(QMainWindow):
 
                 self.update_alert_table(); self.save_alerts()
         else: QMessageBox.warning(self, "Error", "Selected row index out of bounds.")
-
 
     def update_alert_table(self):
         self.alert_table.setRowCount(0); self.alert_table.setRowCount(len(self.alerts))
@@ -716,19 +746,14 @@ class MainWindow(QMainWindow):
                  if item: # Ensure item exists
                     item.setFlags(item.flags() & ~Qt.ItemIsEditable)
 
-
     def toggle_alert_enabled(self, index, state):
-        # Find the correct alert index (important if table sorting is added later)
-        # For now, assume table row corresponds directly to self.alerts index
         if 0 <= index < len(self.alerts):
             is_enabled = (state == Qt.Checked)
             print(f"Toggling alert {index} enabled: {is_enabled}")
             self.alerts[index]['enabled'] = is_enabled
             if is_enabled:
-                # Schedule timer only if enabled
                 self.schedule_alert_timer(self.alerts[index], index)
             else:
-                # Stop timer if disabled
                 self.stop_alert_timer(index)
             self.save_alerts()
         else:
@@ -743,6 +768,7 @@ class MainWindow(QMainWindow):
             'repeat': 'No Repeat',
             'text': '',
             'display': self.settings.get('default_display', 'Main'),
+            'start_corner': self.settings.get('default_start_corner', 'Top-Right'),
             'enabled': True,
             'expansion_time': self.settings.get('default_expansion_time', 60),
             'duration_multiplier': self.settings.get('default_duration_multiplier', 2.0),
@@ -759,33 +785,29 @@ class MainWindow(QMainWindow):
             value = alert_dict.get(key, default_value) # Get value or default
             # Type and value validation/correction
             if key in ['overlay_color', 'text_color']:
-                 # Ensure it's a tuple of 3 ints
                  if isinstance(value, list) and len(value) == 3 and all(isinstance(v, int) for v in value):
                      value = tuple(value)
                  elif not (isinstance(value, tuple) and len(value) == 3 and all(isinstance(v, int) for v in value)):
-                     value = default_value # Use default if invalid format
+                     value = default_value
             elif key == 'repeat':
-                 # Handle old boolean values and ensure valid string
                  if value is True: value = 'Daily'
                  elif value is False: value = 'No Repeat'
                  elif value not in ["No Repeat", "Daily", "Weekly", "Monthly"]: value = 'No Repeat'
+            elif key == 'start_corner':
+                if value not in ["Top-Right", "Top-Left", "Bottom-Left", "Bottom-Right"]:
+                    value = default_value
             elif key == 'weekdays':
-                 # Ensure it's a list, default to empty list if not
                  if not isinstance(value, list): value = []
             elif key in ['expansion_time', 'duration_multiplier', 'transparency', 'text_transparency']:
-                 # Ensure float, use default if invalid
                  try: value = float(value)
                  except (ValueError, TypeError): value = default_value
             elif key in ['start_size', 'day_of_month']:
-                 # Ensure int, use default if invalid
                  try: value = int(value)
                  except (ValueError, TypeError): value = default_value
             elif key == 'enabled':
-                 # Ensure boolean
-                 if not isinstance(value, bool): value = True # Default to enabled if invalid type
+                 if not isinstance(value, bool): value = True
             validated_alert[key] = value
         return validated_alert
-
 
     def load_alerts(self):
         alerts_path = get_config_path('alerts.json')
@@ -794,7 +816,6 @@ class MainWindow(QMainWindow):
             try:
                 with open(alerts_path, 'r', encoding='utf-8') as f: loaded_data = json.load(f)
                 if isinstance(loaded_data, list):
-                    # Validate each loaded alert
                     loaded_alerts = [self.validate_alert(a) for a in loaded_data]
                 else:
                     print("Warning: alerts.json format invalid (expected a list).")
@@ -807,7 +828,7 @@ class MainWindow(QMainWindow):
         # Clear existing timers before loading/scheduling new ones
         for timer in self.alert_timers.values(): timer.stop()
         self.alert_timers.clear()
-        for timer in self.temporary_timers: timer.stop() # Also clear any stray temp timers on load
+        for timer in self.temporary_timers: timer.stop()
         self.temporary_timers.clear()
 
         # Schedule timers for loaded alerts that are enabled
@@ -820,10 +841,8 @@ class MainWindow(QMainWindow):
 
     def save_alerts(self):
         alerts_path = get_config_path('alerts.json')
-        # Create a list safe for JSON serialization (no QTimer objects)
         alerts_to_save = []
         for alert in self.alerts:
-            # Ensure colors are lists for JSON if they are tuples
             alert_copy = alert.copy()
             if isinstance(alert_copy.get('overlay_color'), tuple):
                 alert_copy['overlay_color'] = list(alert_copy['overlay_color'])
@@ -837,7 +856,6 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.warning(self, "Save Error", f"Failed to save alerts to {alerts_path}:\n{e}")
 
-
     # --- Settings Loading/Saving ---
     def load_settings(self):
         settings_path = get_config_path('settings.json')
@@ -847,9 +865,10 @@ class MainWindow(QMainWindow):
             'default_start_size': 200,
             'default_transparency': 39.0,
             'default_text_transparency': 39.0,
-            'default_overlay_color': (0, 0, 0), # Use tuple internally
-            'default_text_color': (255, 255, 255), # Use tuple internally
+            'default_overlay_color': (0, 0, 0),
+            'default_text_color': (255, 255, 255),
             'default_display': 'Main',
+            'default_start_corner': 'Top-Right',
             'max_pixels_per_step': 50,
         }
         if settings_path.exists():
@@ -857,16 +876,13 @@ class MainWindow(QMainWindow):
                 with open(settings_path, 'r', encoding='utf-8') as f:
                     settings_loaded = json.load(f)
 
-                # Validate loaded settings against defaults
                 valid_settings = defaults.copy()
                 for key, default_value in defaults.items():
                     loaded_value = settings_loaded.get(key)
                     if loaded_value is not None:
-                        # Basic type check (more robust checks could be added)
                         if key.endswith('_color'):
-                             # Ensure loaded color is list/tuple of 3 ints
                             if isinstance(loaded_value, (list, tuple)) and len(loaded_value) == 3 and all(isinstance(v, int) for v in loaded_value):
-                                valid_settings[key] = tuple(loaded_value) # Store as tuple
+                                valid_settings[key] = tuple(loaded_value)
                             else: print(f"Warning: Invalid format for '{key}' in settings.json, using default.")
                         elif isinstance(loaded_value, type(default_value)):
                              valid_settings[key] = loaded_value
@@ -879,11 +895,10 @@ class MainWindow(QMainWindow):
                  QMessageBox.warning(self, "Load Error", f"Failed to load settings:\n{e}\nUsing defaults.")
         else:
             print(f"Settings file not found at {settings_path}. Using defaults.")
-        return defaults # Return defaults if file not found or error occurred
+        return defaults
 
     def save_settings(self):
         settings_path = get_config_path('settings.json')
-        # Ensure colors are lists for JSON compatibility
         settings_to_save = self.settings.copy()
         for key in ['default_overlay_color', 'default_text_color']:
              if isinstance(settings_to_save.get(key), tuple):
@@ -895,7 +910,6 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.warning(self, "Save Error", f"Failed to save settings to {settings_path}:\n{e}")
 
-
     def open_settings_dialog(self):
         dialog = SettingsDialog(self, self.settings)
         if dialog.exec_() == QDialog.Accepted:
@@ -905,17 +919,14 @@ class MainWindow(QMainWindow):
     def stop_alert_timer(self, alert_index):
         """Stops and removes the timer for a specific alert index."""
         if alert_index in self.alert_timers:
-            timer = self.alert_timers.pop(alert_index) # Remove from dict
+            timer = self.alert_timers.pop(alert_index)
             timer.stop()
-            # print(f"Stopped and removed timer for alert index {alert_index}")
-        #else: print(f"Timer for alert index {alert_index} not found.")
 
     def schedule_alert_timer(self, alert_data, alert_index):
         """Schedules a QTimer for a regular (non-temporary) alert."""
-        self.stop_alert_timer(alert_index) # Stop existing timer first for this index
+        self.stop_alert_timer(alert_index)
         if not alert_data.get('enabled', True):
-            # print(f"Alert {alert_index} is disabled, not scheduling.")
-            return # Don't schedule if disabled
+            return
 
         alert_time_str = alert_data.get('time')
         if not alert_time_str:
@@ -930,36 +941,25 @@ class MainWindow(QMainWindow):
         next_trigger_datetime = self.calculate_next_trigger(now, alert_data)
 
         if not next_trigger_datetime:
-            # Handle non-repeating past alerts during scheduling attempt
             if alert_data.get('repeat') == 'No Repeat':
                  print(f"Non-repeating Alert {alert_index} ('{alert_data.get('text','')}') is in the past. Disabling.")
-                 # Ensure alert exists at index before modifying
                  if 0 <= alert_index < len(self.alerts):
                      self.alerts[alert_index]['enabled'] = False
-                     self.update_alert_table() # Reflect change in UI
+                     self.update_alert_table()
                      self.save_alerts()
                  else: print(f"Error: Invalid index {alert_index} when trying to disable past alert.")
-            #else: print(f"Could not calculate next trigger for repeating alert {alert_index}.") # Can be noisy
-            return # Cannot schedule if no valid future time
-
-        interval = now.msecsTo(next_trigger_datetime)
-        # Ensure interval is non-negative; handle potential calculation issues
-        if interval < 0:
-            print(f"Warning: Calculated negative interval ({interval}ms) for alert {alert_index} at {next_trigger_datetime.toString()}. Skipping schedule.")
-            # This might indicate an issue in calculate_next_trigger logic if now is later than calculated next_trigger
             return
 
-        # Create and store the timer
+        interval = now.msecsTo(next_trigger_datetime)
+        if interval < 0:
+            print(f"Warning: Calculated negative interval ({interval}ms) for alert {alert_index}. Skipping.")
+            return
+
         timer = QTimer(); timer.setSingleShot(True)
-        # Use lambda to capture current alert_data and index for when timeout occurs
-        # Make a copy of alert_data for the lambda to avoid issues if original dict changes
         timer.timeout.connect(lambda a=alert_data.copy(), idx=alert_index: self.trigger_alert(a, idx))
         timer.start(interval);
-        self.alert_timers[alert_index] = timer # Store the timer
-        # print(f"Scheduled alert {alert_index} ('{alert_data.get('text','')}') for {next_trigger_datetime.toString()} (in {interval/1000.0:.1f}s)")
+        self.alert_timers[alert_index] = timer
 
-
-    # --- FIX 2 Applied Here ---
     def _schedule_single_alert_instance(self, alert_data, is_temporary=False):
          """Schedules a one-off timer, typically for delayed alerts."""
          alert_time_str = alert_data.get('time')
@@ -976,183 +976,138 @@ class MainWindow(QMainWindow):
              return
 
          alert_datetime = QDateTime(alert_date, alert_time)
-         interval = max(0, QDateTime.currentDateTime().msecsTo(alert_datetime)) # Ensure non-negative
+         interval = max(0, QDateTime.currentDateTime().msecsTo(alert_datetime))
 
          temp_timer = QTimer(); temp_timer.setSingleShot(True)
-
-         # Connect to the new handler, passing the timer instance itself
-         # Make a copy of alert_data for the lambda
          temp_timer.timeout.connect(
              lambda a=alert_data.copy(), timer=temp_timer: self._handle_temporary_alert_trigger(a, timer)
          )
 
-         self.temporary_timers.add(temp_timer) # Store reference to keep timer alive
+         self.temporary_timers.add(temp_timer)
          temp_timer.start(interval)
-         # print(f"Scheduled temporary alert instance for {alert_datetime.toString()}. Interval: {interval}ms. Stored timer. Total temp timers: {len(self.temporary_timers)}")
 
-
-    # --- FIX 2 Applied Here ---
     def _handle_temporary_alert_trigger(self, alert_data, timer_instance):
         """Handles the firing of a temporary (delayed) alert timer."""
-        # print(f"Temporary timer fired for alert: {alert_data.get('text', 'No Text')}")
         try:
-            # Call the original logic to show the overlay, index -1 indicates temporary
             self.trigger_alert(alert_data, -1)
         finally:
-            # Ensure the timer reference is removed after firing or if trigger_alert fails
             if timer_instance in self.temporary_timers:
                 self.temporary_timers.remove(timer_instance)
-                # print(f"Removed temporary timer. Remaining: {len(self.temporary_timers)}")
-            # Optionally, schedule the timer object for deletion by Qt's event loop
-            # timer_instance.deleteLater()
 
     def calculate_next_trigger(self, current_datetime, alert_data):
         """Calculates the next QDateTime an alert should trigger based on its repeat settings."""
         alert_time = QTime.fromString(alert_data['time'], "HH:mm:ss")
-        if not alert_time.isValid(): return None # Should have been caught earlier, but check again
+        if not alert_time.isValid(): return None
 
         repeat_mode = alert_data.get('repeat', 'No Repeat')
         start_date = QDate.fromString(alert_data.get('date', ''), "yyyy-MM-dd")
-        if not start_date.isValid(): start_date = current_datetime.date() # Fallback to today if date invalid/missing
+        if not start_date.isValid(): start_date = current_datetime.date()
 
         if repeat_mode == "No Repeat":
             trigger_dt = QDateTime(start_date, alert_time)
-            # Only return if it's in the future relative to now
             return trigger_dt if trigger_dt >= current_datetime else None
 
         elif repeat_mode == "Daily":
-            # Calculate potential trigger time based on start_date first
-            trigger_dt_start = QDateTime(start_date, alert_time)
-
-            # Check today relative to start date
             check_date = current_datetime.date()
-            if check_date < start_date: check_date = start_date # Start checking from start_date if it's future
+            if check_date < start_date: check_date = start_date
 
             trigger_dt_check = QDateTime(check_date, alert_time)
-
             if trigger_dt_check >= current_datetime:
-                return trigger_dt_check # Today (or start_date) is valid
+                return trigger_dt_check
 
-            # If today's time is past, check next day
-            trigger_dt_next = QDateTime(check_date.addDays(1), alert_time)
-            return trigger_dt_next
-
+            return QDateTime(check_date.addDays(1), alert_time)
 
         elif repeat_mode == "Weekly":
             weekdays_map = {"Mon": 1, "Tue": 2, "Wed": 3, "Thu": 4, "Fri": 5, "Sat": 6, "Sun": 7}
             target_days = {weekdays_map[day] for day in alert_data.get('weekdays', []) if day in weekdays_map}
-            if not target_days: return None # No valid days selected
+            if not target_days: return None
 
             check_date = current_datetime.date()
-            # Ensure check_date starts from the alert's start_date if it's in the future
             if check_date < start_date: check_date = start_date
 
-            for i in range(8): # Check starting date + next 7 days
+            for i in range(8):
                  potential_dt = QDateTime(check_date, alert_time)
-                 # Check if day matches AND (it's the check_date/start_date or later AND the potential trigger time is >= now)
                  if check_date.dayOfWeek() in target_days and potential_dt >= current_datetime:
-                      # Check if the date is also on or after the original start date
                      if check_date >= start_date:
-                         return potential_dt # Found the next valid trigger
-                 # Move to the next day
+                         return potential_dt
                  check_date = check_date.addDays(1)
-            return None # No valid trigger found in the next week
+            return None
 
         elif repeat_mode == "Monthly":
             day_of_month = alert_data.get('day_of_month', 1)
-            if not (1 <= day_of_month <= 31): return None # Invalid day
+            if not (1 <= day_of_month <= 31): return None
 
             check_date = current_datetime.date()
-             # Ensure check_date starts from the alert's start_date if it's in the future
             if check_date < start_date: check_date = start_date
 
             year = check_date.year()
             month = check_date.month()
 
-            # Loop indefinitely until a future date is found
             while True:
                 days_in_month = QDate(year, month, 1).daysInMonth()
-                target_day = min(day_of_month, days_in_month) # Handle cases like day 31 in Feb
+                target_day = min(day_of_month, days_in_month)
                 potential_date = QDate(year, month, target_day)
 
-                # Only consider dates on or after the start date
                 if potential_date >= start_date:
                     potential_dt = QDateTime(potential_date, alert_time)
-                    # If this potential datetime is in the future, return it
                     if potential_dt >= current_datetime:
                         return potential_dt
 
-                # Move to the next month
                 month += 1
                 if month > 12:
                     month = 1
                     year += 1
-
-        return None # Should not be reached if repeat mode is valid
-
+        return None
 
     def trigger_alert(self, alert_data, alert_index):
         """Handles the logic when an alert timer (regular or temporary) fires."""
         if alert_index == -1:
-            # This is a temporary/delayed alert
+            # Temporary/delayed alert
             print(f"Triggering temporary/delayed alert: {alert_data.get('text', 'No Text')}")
-            # We don't check self.alerts or enabled status for temporary alerts
-            # The timer is already handled by _handle_temporary_alert_trigger
             self.show_alert_overlay(alert_data)
-
         else:
-            # This is a regular alert scheduled from self.alerts
-            # Check if alert still exists at this index and is enabled before triggering
+            # Regular alert
              if not (0 <= alert_index < len(self.alerts)):
                  print(f"Skipping trigger for alert index {alert_index} (alert removed).")
-                 self.stop_alert_timer(alert_index) # Clean up potential stray timer
+                 self.stop_alert_timer(alert_index)
                  return
-             # Get the *current* config from self.alerts in case it was edited
              current_alert_config = self.alerts[alert_index]
              if not current_alert_config.get('enabled', True):
                  print(f"Skipping trigger for alert {alert_index} (disabled).")
-                 self.stop_alert_timer(alert_index) # Clean up timer if disabled
+                 self.stop_alert_timer(alert_index)
                  return
 
              print(f"Triggering alert (Index: {alert_index}): {current_alert_config.get('text', 'No Text')}")
-             self.show_alert_overlay(current_alert_config) # Show using current config
+             self.show_alert_overlay(current_alert_config)
 
-             # --- Reschedule or Disable ---
+             # Reschedule or Disable
              if current_alert_config.get('repeat', 'No Repeat') == 'No Repeat':
-                 # Disable non-repeating alert after it fires once
                  print(f"Disabling non-repeating alert {alert_index} after triggering.")
                  self.alerts[alert_index]['enabled'] = False
-                 self.stop_alert_timer(alert_index) # Remove its timer
-                 self.update_alert_table() # Update UI to show disabled state
+                 self.stop_alert_timer(alert_index)
+                 self.update_alert_table()
                  self.save_alerts()
              else:
-                 # Reschedule repeating alert for its next occurrence
-                 # print(f"Rescheduling repeating alert {alert_index}.")
                  self.schedule_alert_timer(current_alert_config, alert_index)
-
 
     # --- Overlay Display and Control ---
     def show_alert_overlay(self, alert_data):
         """Creates and displays the TransparentOverlay window(s)."""
-        # Use defaults from settings if specific alert data is missing
         max_pix = self.settings.get('max_pixels_per_step', 50)
         display = alert_data.get('display', self.settings.get('default_display', 'Main'))
+        start_corner = alert_data.get('start_corner', self.settings.get('default_start_corner', 'Top-Right'))
         exp_time = alert_data.get('expansion_time', self.settings.get('default_expansion_time', 60))
         trans = alert_data.get('transparency', self.settings.get('default_transparency', 39))
-        # Ensure colors from data are tuples, falling back to settings defaults (which should be tuples)
         overlay_color_val = alert_data.get('overlay_color', self.settings.get('default_overlay_color', (0,0,0)))
         text_color_val = alert_data.get('text_color', self.settings.get('default_text_color', (255,255,255)))
         color = tuple(overlay_color_val) if isinstance(overlay_color_val, list) else overlay_color_val
         text_color = tuple(text_color_val) if isinstance(text_color_val, list) else text_color_val
-
         size = alert_data.get('start_size', self.settings.get('default_start_size', 200))
         mult = alert_data.get('duration_multiplier', self.settings.get('default_duration_multiplier', 2.0))
         text = alert_data.get('text', '')
         text_trans = alert_data.get('text_transparency', self.settings.get('default_text_transparency', 39))
+        exit_after = exp_time * mult
 
-        exit_after = exp_time * mult # Duration is expansion time * multiplier
-
-        # Determine target screen(s)
         screens = QApplication.screens() if display == 'All' else [QApplication.primaryScreen()]
         if not screens:
             print("Warning: No screens detected by QApplication. Cannot display overlay.")
@@ -1161,44 +1116,37 @@ class MainWindow(QMainWindow):
         for screen in screens:
             if screen is None:
                  print("Warning: Skipping a null screen found in QApplication.screens().")
-                 continue # Skip if a screen is None (e.g., disconnected monitor?)
+                 continue
 
-            # Pass a copy of alert_data to the overlay to avoid shared references?
-            # For now, passing original reference - seems okay as overlay reads it.
-            overlay = TransparentOverlay(exp_time, trans, color, size, max_pix, exit_after, text, text_trans, text_color, alert_data, screen)
-            overlay.closed.connect(self.remove_overlay) # Connect signal for cleanup
+            overlay = TransparentOverlay(exp_time, trans, color, size, max_pix, exit_after, text, text_trans, text_color, alert_data, start_corner, screen)
+            overlay.closed.connect(self.remove_overlay)
             overlay.show()
-            self.overlays.add(overlay) # Add the new overlay object to the active set
-            # print(f"Overlay shown on screen: {screen.name()}. Total active overlays: {len(self.overlays)}")
+            self.overlays.add(overlay)
 
     def remove_overlay(self, overlay_widget):
         """Callback slot when an overlay closes itself."""
         if overlay_widget in self.overlays:
             self.overlays.remove(overlay_widget)
-            # print(f"Overlay removed via closed signal. Remaining active: {len(self.overlays)}")
-        # Optional: Ensure widget is deleted later if needed
-        # overlay_widget.deleteLater()
 
     def test_specific_alert(self, index):
          """Triggers a one-off test display of a configured alert."""
          if 0 <= index < len(self.alerts):
               alert_config = self.alerts[index]
               print(f"Testing alert {index}: {alert_config.get('text')}")
-              # Pass a copy to avoid potential modification issues if overlay held reference long term
               self.show_alert_overlay(alert_config.copy())
          else: QMessageBox.warning(self, "Test Error", "Invalid alert index.")
 
     def send_test_alert(self):
         """Triggers a one-off test display using current default settings."""
         print("Sending test alert using default settings.")
-        # Create alert data based on current default settings
         test_alert = {
             'date': QDate.currentDate().toString("yyyy-MM-dd"),
             'time': QTime.currentTime().toString("HH:mm:ss"),
             'repeat': "No Repeat",
             'text': "Default Settings Test Alert",
             'display': self.settings.get('default_display', 'Main'),
-            'enabled': True, # Not relevant for test display
+            'start_corner': self.settings.get('default_start_corner', 'Top-Right'),
+            'enabled': True,
             'expansion_time': self.settings.get('default_expansion_time', 60),
             'duration_multiplier': self.settings.get('default_duration_multiplier', 2.0),
             'start_size': self.settings.get('default_start_size', 200),
@@ -1207,8 +1155,7 @@ class MainWindow(QMainWindow):
             'overlay_color': self.settings.get('default_overlay_color', (0,0,0)),
             'text_color': self.settings.get('default_text_color', (255,255,255)),
          }
-        self.show_alert_overlay(test_alert) # Show using the created data
-
+        self.show_alert_overlay(test_alert)
 
     def stop_ongoing_alerts(self, silent=False):
         """Closes all currently active overlay windows."""
@@ -1216,20 +1163,18 @@ class MainWindow(QMainWindow):
              if not silent: print("No ongoing alerts to stop.")
              return
 
-        # Create a copy of the set to iterate over, as closing modifies the original set
         overlays_to_close = list(self.overlays)
         num_stopped = len(overlays_to_close)
         if not silent: print(f"Stopping {num_stopped} ongoing alert overlay(s)...")
 
         for overlay in overlays_to_close:
              try:
-                 # Disconnect the signal first to prevent remove_overlay being called redundantly
                  overlay.closed.disconnect(self.remove_overlay)
              except TypeError:
-                 pass # Signal might not be connected if already closing
-             overlay.close() # Close the widget window
+                 pass
+             overlay.close()
 
-        self.overlays.clear() # Clear the set now
+        self.overlays.clear()
 
         if not silent:
              print("All overlays stopped.")
@@ -1243,7 +1188,7 @@ if __name__ == "__main__":
     app = QApplication(sys.argv)
     app.setApplicationName("GentleAlertScheduler")
     app.setOrganizationName("YourOrg") # Optional
-    app.setApplicationVersion("1.4") # Incremented version for fixes
+    app.setApplicationVersion("1.6") # Incremented version for bug fix
 
     # Ensure config directory exists before creating window
     get_config_dir()
