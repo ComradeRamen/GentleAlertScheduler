@@ -1,6 +1,6 @@
 # GentleAlertScheduler
 
-A simple desktop application for scheduling alerts on Windows. When an alert triggers, it displays a semi-transparent click-through overlay that gently expands to cover the screen over a configured duration.
+A simple desktop application for scheduling alerts/reminders on Windows. When an alert triggers, it displays a semi-transparent click-through overlay that gently expands to cover the screen over a configured duration.
 
 <img width="1367" alt="Screenshot 2025-04-23 012722" src="https://github.com/user-attachments/assets/8a68aeb9-e82f-4236-90ef-4f96e7a648b9" />
 
