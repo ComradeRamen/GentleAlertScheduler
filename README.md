@@ -6,7 +6,7 @@ A simple desktop application for scheduling alerts/reminders on Windows. When an
 
 ## Features
 
-* Schedule alerts with specific dates, times, and recurrence (daily, weekly, monthly).
+* Schedule alerts with specific dates, times, and recurrence (daily, weekly, monthly, x minutes/hours).
 * Customize overlay appearance: expansion time, duration, transparency, color, start size, and optional text.
 * Configure default settings for new alerts.
 * Manage alerts via a table interface (add, edit, remove, test).
