@@ -200,7 +200,7 @@ class AddAlertDialog(QDialog):
         self.time_edit = QTimeEdit(QTime.fromString(edit_data.get('time', QTime.currentTime().toString("HH:mm:ss")), "HH:mm:ss"))
         self.form_layout.addRow("Alert Time:", self.time_edit)
         self.repeat_combo = QComboBox()
-        self.repeat_combo.addItems(["No Repeat", "Daily", "Weekly", "Monthly"])
+        self.repeat_combo.addItems(["No Repeat", "Daily", "Weekly", "Monthly", "Every X Minutes", "Every X Hours"])
         self.repeat_combo.setCurrentText(edit_data.get('repeat', 'No Repeat'))
         self.repeat_combo.currentIndexChanged.connect(self.update_repeat_options)
         self.form_layout.addRow("Repeat:", self.repeat_combo)
@@ -214,14 +214,19 @@ class AddAlertDialog(QDialog):
             checkbox = QCheckBox(day); checkbox.setChecked(day in selected_weekdays)
             self.weekday_checkboxes.append(checkbox); weekdays_layout.addWidget(checkbox)
         self.weekdays_widget = QWidget(); self.weekdays_widget.setLayout(weekdays_layout)
-        # Use labelForField later in update_repeat_options
         self.form_layout.addRow("Days of Week:", self.weekdays_widget)
 
         # Day of Month
         self.day_of_month_spinbox = QSpinBox(); self.day_of_month_spinbox.setRange(1, 31)
         self.day_of_month_spinbox.setValue(edit_data.get('day_of_month', 1))
-        # Use labelForField later in update_repeat_options
         self.form_layout.addRow("Day of Month:", self.day_of_month_spinbox)
+
+        # Interval
+        self.interval_spinbox = QSpinBox()
+        self.interval_spinbox.setRange(1, 10000)  # A large range, will be adjusted dynamically
+        self.interval_spinbox.setValue(edit_data.get('interval_value', 60))
+        # The label text will be set dynamically in update_repeat_options
+        self.form_layout.addRow("Interval:", self.interval_spinbox)
 
         # Text
         self.text_edit = QLineEdit(edit_data.get('text', ''))
@@ -283,10 +288,14 @@ class AddAlertDialog(QDialog):
         repeat_mode = self.repeat_combo.currentText()
         is_weekly = (repeat_mode == "Weekly")
         is_monthly = (repeat_mode == "Monthly")
+        is_minutes = (repeat_mode == "Every X Minutes")
+        is_hours = (repeat_mode == "Every X Hours")
+        is_interval = is_minutes or is_hours
 
         # Hide/show field widgets
         self.weekdays_widget.setVisible(is_weekly)
         self.day_of_month_spinbox.setVisible(is_monthly)
+        self.interval_spinbox.setVisible(is_interval)
 
         # Hide/show corresponding labels using labelForField
         weekdays_label = self.form_layout.labelForField(self.weekdays_widget)
@@ -296,6 +305,16 @@ class AddAlertDialog(QDialog):
         day_of_month_label = self.form_layout.labelForField(self.day_of_month_spinbox)
         if day_of_month_label:
             day_of_month_label.setVisible(is_monthly)
+
+        interval_label = self.form_layout.labelForField(self.interval_spinbox)
+        if interval_label:
+            interval_label.setVisible(is_interval)
+            if is_minutes:
+                interval_label.setText("Interval (Minutes):")
+                self.interval_spinbox.setRange(1, 1440)  # Max 24 hours in minutes
+            elif is_hours:
+                interval_label.setText("Interval (Hours):")
+                self.interval_spinbox.setRange(1, 168)  # Max 1 week in hours
 
 
     def select_overlay_color(self):
@@ -332,6 +351,10 @@ class AddAlertDialog(QDialog):
         }
         if repeat_mode == "Weekly": alert['weekdays'] = [cb.text() for cb in self.weekday_checkboxes if cb.isChecked()]
         elif repeat_mode == "Monthly": alert['day_of_month'] = self.day_of_month_spinbox.value()
+        elif repeat_mode in ["Every X Minutes", "Every X Hours"]:
+            interval = self.interval_spinbox.value()
+            # Store interval consistently in minutes
+            alert['interval_value'] = interval if repeat_mode == "Every X Minutes" else interval * 60
         return alert
 
 # --- Settings Dialog ---
@@ -727,7 +750,20 @@ class MainWindow(QMainWindow):
         for row, alert in enumerate(self.alerts):
             self.alert_table.setItem(row, 0, QTableWidgetItem(alert.get('date', 'N/A')))
             self.alert_table.setItem(row, 1, QTableWidgetItem(alert.get('time', 'N/A')))
-            self.alert_table.setItem(row, 2, QTableWidgetItem(alert.get('repeat', 'N/A')))
+            
+            repeat_text = alert.get('repeat', 'N/A')
+            if repeat_text == "Every X Minutes":
+                repeat_text = f"Every {alert.get('interval_value', '?')} min"
+            elif repeat_text == "Every X Hours":
+                # Stored as minutes, so convert back for display
+                interval_mins = alert.get('interval_value', 0)
+                if interval_mins > 0 and interval_mins % 60 == 0:
+                    hours = interval_mins // 60
+                    repeat_text = f"Every {hours} hr"
+                else: # Fallback if data is inconsistent
+                    repeat_text = f"Every {interval_mins} min"
+            self.alert_table.setItem(row, 2, QTableWidgetItem(repeat_text))
+
             self.alert_table.setItem(row, 3, QTableWidgetItem(alert.get('text', '')))
             self.alert_table.setItem(row, 4, QTableWidgetItem(alert.get('display', 'Main')))
             # Enabled Checkbox
@@ -779,6 +815,7 @@ class MainWindow(QMainWindow):
             'text_color': self.settings.get('default_text_color', (255, 255, 255)),
             'weekdays': [],
             'day_of_month': 1,
+            'interval_value': 60,
         }
         validated_alert = {}
         for key, default_value in defaults.items():
@@ -792,7 +829,7 @@ class MainWindow(QMainWindow):
             elif key == 'repeat':
                  if value is True: value = 'Daily'
                  elif value is False: value = 'No Repeat'
-                 elif value not in ["No Repeat", "Daily", "Weekly", "Monthly"]: value = 'No Repeat'
+                 elif value not in ["No Repeat", "Daily", "Weekly", "Monthly", "Every X Minutes", "Every X Hours"]: value = 'No Repeat'
             elif key == 'start_corner':
                 if value not in ["Top-Right", "Top-Left", "Bottom-Left", "Bottom-Right"]:
                     value = default_value
@@ -801,7 +838,7 @@ class MainWindow(QMainWindow):
             elif key in ['expansion_time', 'duration_multiplier', 'transparency', 'text_transparency']:
                  try: value = float(value)
                  except (ValueError, TypeError): value = default_value
-            elif key in ['start_size', 'day_of_month']:
+            elif key in ['start_size', 'day_of_month', 'interval_value']:
                  try: value = int(value)
                  except (ValueError, TypeError): value = default_value
             elif key == 'enabled':
@@ -1007,6 +1044,27 @@ class MainWindow(QMainWindow):
             trigger_dt = QDateTime(start_date, alert_time)
             return trigger_dt if trigger_dt >= current_datetime else None
 
+        elif repeat_mode in ["Every X Minutes", "Every X Hours"]:
+            interval_minutes = alert_data.get('interval_value', 0)
+            if interval_minutes <= 0: return None # Invalid interval
+
+            start_datetime = QDateTime(start_date, alert_time)
+
+            # If the start time is in the future, that's the next trigger
+            if start_datetime >= current_datetime:
+                return start_datetime
+
+            # If start time is in the past, calculate the next interval tick
+            interval_msecs = interval_minutes * 60 * 1000
+            msecs_since_start = start_datetime.msecsTo(current_datetime)
+
+            # How many full intervals have passed since the start time
+            intervals_passed = msecs_since_start // interval_msecs
+
+            # The next trigger is at the start of the next interval
+            next_trigger_msecs_from_start = (intervals_passed + 1) * interval_msecs
+            return start_datetime.addMSecs(next_trigger_msecs_from_start)
+
         elif repeat_mode == "Daily":
             check_date = current_datetime.date()
             if check_date < start_date: check_date = start_date
@@ -1188,7 +1246,7 @@ if __name__ == "__main__":
     app = QApplication(sys.argv)
     app.setApplicationName("GentleAlertScheduler")
     app.setOrganizationName("YourOrg") # Optional
-    app.setApplicationVersion("1.6") # Incremented version for bug fix
+    app.setApplicationVersion("1.7") # Incremented version for new feature
 
     # Ensure config directory exists before creating window
     get_config_dir()
