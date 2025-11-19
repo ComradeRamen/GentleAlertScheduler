@@ -12,6 +12,8 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtCore import Qt, QTime, QDate, QDateTime, QTimer, QSize, pyqtSignal
 from PyQt5.QtGui import QPainter, QColor, QFont, QIcon
+import ctypes
+from ctypes import wintypes
 
 # Conditional import for Windows features
 if sys.platform == "win32":
@@ -60,6 +62,38 @@ def get_config_dir():
 def get_config_path(filename):
     """Gets the full path for a specific config file."""
     return get_config_dir() / filename
+
+def is_foreground_fullscreen():
+    """Checks if the foreground window is running in fullscreen mode."""
+    if sys.platform != "win32": return False
+    try:
+        user32 = ctypes.windll.user32
+        hwnd = user32.GetForegroundWindow()
+        if not hwnd: return False
+
+        screen_width = user32.GetSystemMetrics(0)
+        screen_height = user32.GetSystemMetrics(1)
+        
+        rect = ctypes.wintypes.RECT()
+        user32.GetWindowRect(hwnd, ctypes.byref(rect))
+        
+        win_width = rect.right - rect.left
+        win_height = rect.bottom - rect.top
+        
+        return (win_width == screen_width) and (win_height == screen_height)
+    except Exception:
+        return False
+
+def press_windows_key():
+    """Simulates a Windows key press to open the Start Menu."""
+    if sys.platform != "win32": return
+    try:
+        # VK_LWIN = 0x5B
+        ctypes.windll.user32.keybd_event(0x5B, 0, 0, 0) # Key down
+        ctypes.windll.user32.keybd_event(0x5B, 0, 2, 0) # Key up (KEYEVENTF_KEYUP = 2)
+        print("Simulated Windows Key press.")
+    except Exception as e:
+        print(f"Failed to press Windows Key: {e}")
 
 # --- Transparent Overlay Class ---
 
@@ -270,6 +304,11 @@ class AddAlertDialog(QDialog):
         self.start_corner_combo.setCurrentText(edit_data.get('start_corner', self.default_settings.get('default_start_corner', 'Top-Right')))
         self.form_layout.addRow("Start Corner:", self.start_corner_combo)
 
+        # Fullscreen Fallback
+        self.fullscreen_fallback_cb = QCheckBox("Press Windows Key if Fullscreen Detected")
+        self.fullscreen_fallback_cb.setChecked(edit_data.get('fullscreen_fallback', self.default_settings.get('default_fullscreen_fallback', True)))
+        self.form_layout.addRow("Fullscreen Behavior:", self.fullscreen_fallback_cb)
+
         # OK/Cancel Buttons
         self.button_layout = QHBoxLayout()
         self.ok_button = QPushButton("OK"); self.cancel_button = QPushButton("Cancel")
@@ -348,6 +387,7 @@ class AddAlertDialog(QDialog):
             'text_transparency': self.text_transparency_edit.value(),
             'overlay_color': self.overlay_color,
             'text_color': self.text_color,
+            'fullscreen_fallback': self.fullscreen_fallback_cb.isChecked(),
         }
         if repeat_mode == "Weekly": alert['weekdays'] = [cb.text() for cb in self.weekday_checkboxes if cb.isChecked()]
         elif repeat_mode == "Monthly": alert['day_of_month'] = self.day_of_month_spinbox.value()
@@ -429,6 +469,11 @@ class SettingsDialog(QDialog):
         self.max_pixels_per_step_edit.setValue(self.settings.get('max_pixels_per_step', 50))
         form_layout.addRow("Max Pixels Per Step (Expansion):", self.max_pixels_per_step_edit)
 
+        # Default Fullscreen Fallback
+        self.default_fullscreen_fallback_cb = QCheckBox("Press Windows Key if Fullscreen Detected")
+        self.default_fullscreen_fallback_cb.setChecked(self.settings.get('default_fullscreen_fallback', True))
+        form_layout.addRow("Default Fullscreen Behavior:", self.default_fullscreen_fallback_cb)
+
         self.layout.addLayout(form_layout)
 
         # Buttons
@@ -473,8 +518,8 @@ class SettingsDialog(QDialog):
             'default_display': self.default_display_combo.currentText(),
             'default_start_corner': self.default_start_corner_combo.currentText(),
             'max_pixels_per_step': self.max_pixels_per_step_edit.value(),
+            'default_fullscreen_fallback': self.default_fullscreen_fallback_cb.isChecked(),
         }
-
 # --- Main Window Class ---
 
 class MainWindow(QMainWindow):
@@ -816,6 +861,7 @@ class MainWindow(QMainWindow):
             'weekdays': [],
             'day_of_month': 1,
             'interval_value': 60,
+            'fullscreen_fallback': self.settings.get('default_fullscreen_fallback', True),
         }
         validated_alert = {}
         for key, default_value in defaults.items():
@@ -842,6 +888,8 @@ class MainWindow(QMainWindow):
                  try: value = int(value)
                  except (ValueError, TypeError): value = default_value
             elif key == 'enabled':
+                 if not isinstance(value, bool): value = True
+            elif key == 'fullscreen_fallback':
                  if not isinstance(value, bool): value = True
             validated_alert[key] = value
         return validated_alert
@@ -892,7 +940,6 @@ class MainWindow(QMainWindow):
                 json.dump(alerts_to_save, f, indent=4, ensure_ascii=False)
         except Exception as e:
             QMessageBox.warning(self, "Save Error", f"Failed to save alerts to {alerts_path}:\n{e}")
-
     # --- Settings Loading/Saving ---
     def load_settings(self):
         settings_path = get_config_path('settings.json')
@@ -907,6 +954,7 @@ class MainWindow(QMainWindow):
             'default_display': 'Main',
             'default_start_corner': 'Top-Right',
             'max_pixels_per_step': 50,
+            'default_fullscreen_fallback': True,
         }
         if settings_path.exists():
             try:
@@ -991,6 +1039,17 @@ class MainWindow(QMainWindow):
         if interval < 0:
             print(f"Warning: Calculated negative interval ({interval}ms) for alert {alert_index}. Skipping.")
             return
+
+        # Cap interval to avoid OverflowError in QTimer (approx 24 days in ms)
+        MAX_TIMER_MS = 2147483647 
+        if interval > MAX_TIMER_MS:
+             # Schedule a timer for the max duration, then reschedule
+             print(f"Interval {interval} exceeds QTimer limit. Scheduling intermediate timer.")
+             timer = QTimer(); timer.setSingleShot(True)
+             timer.timeout.connect(lambda: self.schedule_alert_timer(alert_data, alert_index))
+             timer.start(MAX_TIMER_MS)
+             self.alert_timers[alert_index] = timer
+             return
 
         timer = QTimer(); timer.setSingleShot(True)
         timer.timeout.connect(lambda a=alert_data.copy(), idx=alert_index: self.trigger_alert(a, idx))
@@ -1151,6 +1210,12 @@ class MainWindow(QMainWindow):
     # --- Overlay Display and Control ---
     def show_alert_overlay(self, alert_data):
         """Creates and displays the TransparentOverlay window(s)."""
+        
+        # Check for fullscreen fallback
+        if alert_data.get('fullscreen_fallback', True) and is_foreground_fullscreen():
+            print("Fullscreen app detected. Triggering Windows Key fallback.")
+            press_windows_key()
+
         max_pix = self.settings.get('max_pixels_per_step', 50)
         display = alert_data.get('display', self.settings.get('default_display', 'Main'))
         start_corner = alert_data.get('start_corner', self.settings.get('default_start_corner', 'Top-Right'))
@@ -1212,6 +1277,7 @@ class MainWindow(QMainWindow):
             'text_transparency': self.settings.get('default_text_transparency', 39),
             'overlay_color': self.settings.get('default_overlay_color', (0,0,0)),
             'text_color': self.settings.get('default_text_color', (255,255,255)),
+            'fullscreen_fallback': self.settings.get('default_fullscreen_fallback', True),
          }
         self.show_alert_overlay(test_alert)
 
