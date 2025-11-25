@@ -64,23 +64,18 @@ def get_config_path(filename):
     return get_config_dir() / filename
 
 def is_foreground_fullscreen():
-    """Checks if the foreground window is running in fullscreen mode."""
+    """Checks if the foreground window is running in exclusive fullscreen mode."""
     if sys.platform != "win32": return False
     try:
-        user32 = ctypes.windll.user32
-        hwnd = user32.GetForegroundWindow()
-        if not hwnd: return False
-
-        screen_width = user32.GetSystemMetrics(0)
-        screen_height = user32.GetSystemMetrics(1)
-        
-        rect = ctypes.wintypes.RECT()
-        user32.GetWindowRect(hwnd, ctypes.byref(rect))
-        
-        win_width = rect.right - rect.left
-        win_height = rect.bottom - rect.top
-        
-        return (win_width == screen_width) and (win_height == screen_height)
+        # Use SHQueryUserNotificationState to detect exclusive fullscreen (D3D)
+        # This avoids triggering on borderless windowed games or maximized windows
+        # where the overlay can still be displayed normally.
+        shell32 = ctypes.windll.shell32
+        QUNS_RUNNING_D3D_FULL_SCREEN = 3
+        state = ctypes.c_int()
+        if shell32.SHQueryUserNotificationState(ctypes.byref(state)) == 0:
+            return state.value == QUNS_RUNNING_D3D_FULL_SCREEN
+        return False
     except Exception:
         return False
 
