@@ -8,7 +8,7 @@ from PyQt5.QtWidgets import (
     QTableWidget, QTableWidgetItem, QHeaderView, QDialog, QLabel,
     QLineEdit, QComboBox, QTimeEdit, QDateEdit, QCheckBox, QHBoxLayout, QMessageBox,
     QColorDialog, QSpinBox, QFormLayout, QDoubleSpinBox, QSystemTrayIcon,
-    QMenu, QAction, QStyle, QGridLayout
+    QMenu, QAction, QStyle, QGridLayout, QDateTimeEdit, QGroupBox
 )
 from PyQt5.QtCore import Qt, QTime, QDate, QDateTime, QTimer, QSize, pyqtSignal
 from PyQt5.QtGui import QPainter, QColor, QFont, QIcon
@@ -253,7 +253,12 @@ class AddAlertDialog(QDialog):
         # Interval
         self.interval_spinbox = QSpinBox()
         self.interval_spinbox.setRange(1, 10000)  # A large range, will be adjusted dynamically
-        self.interval_spinbox.setValue(edit_data.get('interval_value', 60))
+        
+        initial_val = edit_data.get('interval_value', 60)
+        if edit_data.get('repeat') == "Every X Hours":
+            initial_val = initial_val // 60
+            
+        self.interval_spinbox.setValue(initial_val)
         # The label text will be set dynamically in update_repeat_options
         self.form_layout.addRow("Interval:", self.interval_spinbox)
 
@@ -304,6 +309,49 @@ class AddAlertDialog(QDialog):
         self.fullscreen_fallback_cb.setChecked(edit_data.get('fullscreen_fallback', self.default_settings.get('default_fullscreen_fallback', True)))
         self.form_layout.addRow("Fullscreen Behavior:", self.fullscreen_fallback_cb)
 
+        # --- Frequency Prompt Configuration ---
+        self.fp_group = QGroupBox("Dynamic Frequency Prompt")
+        self.fp_group.setCheckable(True)
+        self.fp_group.setChecked(edit_data.get('frequency_prompt', {}).get('enabled', False))
+        fp_layout = QFormLayout()
+        
+        # Prompt Time
+        self.fp_time_edit = QTimeEdit()
+        default_time = QTime.fromString(edit_data.get('frequency_prompt', {}).get('prompt_time', "09:00:00"), "HH:mm:ss")
+        if not default_time.isValid(): default_time = QTime(9, 0)
+        self.fp_time_edit.setTime(default_time)
+        fp_layout.addRow("Prompt Time:", self.fp_time_edit)
+
+        # Question
+        self.fp_question = QLineEdit(edit_data.get('frequency_prompt', {}).get('question', "Change alert interval?"))
+        fp_layout.addRow("Question:", self.fp_question)
+
+        # Options Table
+        self.fp_options_table = QTableWidget()
+        self.fp_options_table.setColumnCount(3)
+        self.fp_options_table.setHorizontalHeaderLabels(["Label", "Interval (min)", ""])
+        self.fp_options_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.fp_options_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.fp_options_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        
+        # Load existing options or default
+        saved_options = edit_data.get('frequency_prompt', {}).get('options', [])
+        is_hours = (edit_data.get('repeat') == "Every X Hours")
+        for opt in saved_options:
+            val = opt.get('interval', 60)
+            if is_hours: val = val // 60 # Convert minutes to hours for display
+            self.add_fp_option_row(opt.get('label', ''), val)
+        
+        # Add button for options
+        add_opt_btn = QPushButton("+ Add Option")
+        add_opt_btn.clicked.connect(lambda: self.add_fp_option_row("", self.get_current_base_interval()))
+        
+        fp_layout.addRow(self.fp_options_table)
+        fp_layout.addRow(add_opt_btn)
+        
+        self.fp_group.setLayout(fp_layout)
+        self.form_layout.addRow(self.fp_group)
+
         # OK/Cancel Buttons
         self.button_layout = QHBoxLayout()
         self.ok_button = QPushButton("OK"); self.cancel_button = QPushButton("Cancel")
@@ -325,6 +373,15 @@ class AddAlertDialog(QDialog):
         is_minutes = (repeat_mode == "Every X Minutes")
         is_hours = (repeat_mode == "Every X Hours")
         is_interval = is_minutes or is_hours
+
+        # Toggle Frequency Prompt availability
+        self.fp_group.setEnabled(is_interval)
+        if not is_interval:
+            self.fp_group.setChecked(False)
+
+        # Update unit in options table
+        header_text = "Interval (Hours)" if is_hours else "Interval (Minutes)"
+        self.fp_options_table.setHorizontalHeaderItem(1, QTableWidgetItem(header_text))
 
         # Hide/show field widgets
         self.weekdays_widget.setVisible(is_weekly)
@@ -351,6 +408,23 @@ class AddAlertDialog(QDialog):
                 self.interval_spinbox.setRange(1, 168)  # Max 1 week in hours
 
 
+    def add_fp_option_row(self, label, interval):
+        row = self.fp_options_table.rowCount()
+        self.fp_options_table.insertRow(row)
+        
+        label_item = QLineEdit(label)
+        self.fp_options_table.setCellWidget(row, 0, label_item)
+        
+        interval_item = QSpinBox()
+        interval_item.setRange(1, 100000)
+        interval_item.setValue(interval)
+        self.fp_options_table.setCellWidget(row, 1, interval_item)
+        
+        del_btn = QPushButton("X")
+        del_btn.setStyleSheet("color: red; font-weight: bold;")
+        del_btn.clicked.connect(lambda: self.fp_options_table.removeRow(self.fp_options_table.indexAt(del_btn.pos()).row()))
+        self.fp_options_table.setCellWidget(row, 2, del_btn)
+
     def select_overlay_color(self):
         initial_color = QColor(*self.overlay_color)
         color = QColorDialog.getColor(initial_color, self, "Select Overlay Color")
@@ -364,6 +438,11 @@ class AddAlertDialog(QDialog):
         if color.isValid():
             self.text_color = (color.red(), color.green(), color.blue())
             self.update_color_button_style(self.text_color_button, self.text_color)
+            
+    def get_current_base_interval(self):
+        # Return the raw value visible in the spinner
+        # If in hours mode, this returns hours. If minutes, minutes.
+        return self.interval_spinbox.value()
 
     def get_alert(self):
         repeat_mode = self.repeat_combo.currentText()
@@ -384,6 +463,27 @@ class AddAlertDialog(QDialog):
             'text_color': self.text_color,
             'fullscreen_fallback': self.fullscreen_fallback_cb.isChecked(),
         }
+        
+        if self.fp_group.isChecked():
+            prompt_data = {
+                'enabled': True,
+                'prompt_time': self.fp_time_edit.time().toString("HH:mm:ss"),
+                'question': self.fp_question.text(),
+                'options': []
+            }
+            for i in range(self.fp_options_table.rowCount()):
+                lbl = self.fp_options_table.cellWidget(i, 0).text()
+                inv = self.fp_options_table.cellWidget(i, 1).value()
+                # If mode is Hours, convert displayed Hours back to Minutes for storage
+                if repeat_mode == "Every X Hours":
+                    inv = inv * 60
+                
+                # Save option even if label is empty
+                prompt_data['options'].append({'label': lbl, 'interval': inv})
+            alert['frequency_prompt'] = prompt_data
+        else:
+            alert['frequency_prompt'] = {'enabled': False}
+
         if repeat_mode == "Weekly": alert['weekdays'] = [cb.text() for cb in self.weekday_checkboxes if cb.isChecked()]
         elif repeat_mode == "Monthly": alert['day_of_month'] = self.day_of_month_spinbox.value()
         elif repeat_mode in ["Every X Minutes", "Every X Hours"]:
@@ -391,6 +491,57 @@ class AddAlertDialog(QDialog):
             # Store interval consistently in minutes
             alert['interval_value'] = interval if repeat_mode == "Every X Minutes" else interval * 60
         return alert
+
+# --- Frequency Prompt Dialog ---
+class FrequencyPromptDialog(QDialog):
+    def __init__(self, question, options, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Gentle Check-in")
+        self.setWindowFlags(self.windowFlags() | Qt.WindowStaysOnTopHint) # Ensure it pops up visible
+        self.layout = QVBoxLayout(self)
+        
+        question_label = QLabel(question)
+        question_label.setWordWrap(True)
+        question_label.setAlignment(Qt.AlignCenter)
+        font = question_label.font()
+        font.setPointSize(12)
+        question_label.setFont(font)
+        self.layout.addWidget(question_label)
+        
+        # Next Prompt Time
+        self.layout.addWidget(QLabel("Ask again at:"))
+        self.next_prompt_edit = QDateTimeEdit(QDateTime.currentDateTime().addDays(1))
+        self.next_prompt_edit.setDisplayFormat("yyyy-MM-dd HH:mm:ss")
+        self.next_prompt_edit.setCalendarPopup(True)
+        self.layout.addWidget(self.next_prompt_edit)
+        
+        self.selected_interval = None
+        self.next_prompt_time = None
+        
+        buttons_layout = QVBoxLayout()
+        for opt in options:
+            label = opt.get('label', 'Option')
+            interval_mins = opt.get('interval', 60)
+            
+            # Smart formatting for display
+            if interval_mins >= 60 and interval_mins % 60 == 0:
+                time_str = f"{int(interval_mins/60)}h"
+            else:
+                time_str = f"{interval_mins}m"
+                
+            btn_text = f"{label} ({time_str})"
+            
+            btn = QPushButton(btn_text)
+            # Use default arg to capture value in lambda
+            btn.clicked.connect(lambda checked, interval=interval_mins: self.select_option(interval))
+            buttons_layout.addWidget(btn)
+            
+        self.layout.addLayout(buttons_layout)
+        
+    def select_option(self, interval):
+        self.selected_interval = interval
+        self.next_prompt_time = self.next_prompt_edit.dateTime()
+        self.accept()
 
 # --- Settings Dialog ---
 class SettingsDialog(QDialog):
@@ -550,6 +701,7 @@ class MainWindow(QMainWindow):
         self.alerts = []
         self.overlays = set() # Use set for active overlays
         self.alert_timers = {} # {alert_index: QTimer} for regular scheduled alerts
+        self.frequency_timers = {} # {alert_index: QTimer} for frequency prompts
         self.temporary_timers = set()
 
         # Load settings and alerts
@@ -836,7 +988,11 @@ class MainWindow(QMainWindow):
             print(f"Warning: toggle_alert_enabled called with invalid index {index}")
 
     # --- Alert Loading, Saving, Validation ---
+
     def validate_alert(self, alert_dict):
+        # Start with the existing data to preserve any unknown keys (forward compatibility)
+        validated_alert = alert_dict.copy()
+        
         # Use current settings as defaults during validation
         defaults = {
             'date': QDate.currentDate().toString("yyyy-MM-dd"),
@@ -857,10 +1013,17 @@ class MainWindow(QMainWindow):
             'day_of_month': 1,
             'interval_value': 60,
             'fullscreen_fallback': self.settings.get('default_fullscreen_fallback', True),
+            'frequency_prompt': {'enabled': False}
         }
-        validated_alert = {}
+        
         for key, default_value in defaults.items():
-            value = alert_dict.get(key, default_value) # Get value or default
+            # If key is missing, add it with default
+            if key not in validated_alert:
+                validated_alert[key] = default_value
+                continue
+                
+            value = validated_alert[key]
+            
             # Type and value validation/correction
             if key in ['overlay_color', 'text_color']:
                  if isinstance(value, list) and len(value) == 3 and all(isinstance(v, int) for v in value):
@@ -886,11 +1049,30 @@ class MainWindow(QMainWindow):
                  if not isinstance(value, bool): value = True
             elif key == 'fullscreen_fallback':
                  if not isinstance(value, bool): value = True
+            elif key == 'frequency_prompt':
+                 if not isinstance(value, dict): value = default_value
+                 
             validated_alert[key] = value
+            
         return validated_alert
 
     def load_alerts(self):
         alerts_path = get_config_path('alerts.json')
+        
+        # Backup existing alerts on startup (Safety measure)
+        if alerts_path.exists():
+            try:
+                import shutil
+                # Create timestamped backup to avoid overwriting
+                timestamp = QDateTime.currentDateTime().toString("yyyyMMdd_HHmmss")
+                backup_filename = f"alerts_backup_{timestamp}.json"
+                backup_path = get_config_path(backup_filename)
+                
+                shutil.copy2(alerts_path, backup_path)
+                print(f"Backed up alerts to {backup_filename}")
+            except Exception as e:
+                print(f"Warning: Failed to create backup of alerts.json: {e}")
+
         loaded_alerts = []
         if alerts_path.exists():
             try:
@@ -908,6 +1090,8 @@ class MainWindow(QMainWindow):
         # Clear existing timers before loading/scheduling new ones
         for timer in self.alert_timers.values(): timer.stop()
         self.alert_timers.clear()
+        for timer in self.frequency_timers.values(): timer.stop()
+        self.frequency_timers.clear()
         for timer in self.temporary_timers: timer.stop()
         self.temporary_timers.clear()
 
@@ -928,6 +1112,9 @@ class MainWindow(QMainWindow):
                 alert_copy['overlay_color'] = list(alert_copy['overlay_color'])
             if isinstance(alert_copy.get('text_color'), tuple):
                 alert_copy['text_color'] = list(alert_copy['text_color'])
+            # Ensure frequency prompt data structure is saved correctly
+            if 'frequency_prompt' in alert_copy and not isinstance(alert_copy['frequency_prompt'], dict):
+                 alert_copy['frequency_prompt'] = {'enabled': False}
             alerts_to_save.append(alert_copy)
 
         try:
@@ -1002,6 +1189,11 @@ class MainWindow(QMainWindow):
             timer = self.alert_timers.pop(alert_index)
             timer.stop()
 
+    def stop_frequency_timer(self, alert_index):
+        if alert_index in self.frequency_timers:
+            timer = self.frequency_timers.pop(alert_index)
+            timer.stop()
+
     def schedule_alert_timer(self, alert_data, alert_index):
         """Schedules a QTimer for a regular (non-temporary) alert."""
         self.stop_alert_timer(alert_index)
@@ -1050,6 +1242,85 @@ class MainWindow(QMainWindow):
         timer.timeout.connect(lambda a=alert_data.copy(), idx=alert_index: self.trigger_alert(a, idx))
         timer.start(interval);
         self.alert_timers[alert_index] = timer
+        
+        # Schedule Frequency Prompt if enabled
+        self.schedule_frequency_timer(alert_data, alert_index)
+
+    def schedule_frequency_timer(self, alert_data, alert_index, target_datetime=None):
+        self.stop_frequency_timer(alert_index)
+        
+        fp_data = alert_data.get('frequency_prompt', {})
+        if not fp_data.get('enabled', False):
+            return
+            
+        if target_datetime:
+             # Schedule for specific time requested by user (e.g. from dialog)
+             interval_ms = QDateTime.currentDateTime().msecsTo(target_datetime)
+             if interval_ms < 0: interval_ms = 1000 
+        else:
+            # Fallback to configured daily time
+            prompt_time_str = fp_data.get('prompt_time', "09:00:00")
+            prompt_time = QTime.fromString(prompt_time_str, "HH:mm:ss")
+            if not prompt_time.isValid(): prompt_time = QTime(9, 0)
+            
+            now = QDateTime.currentDateTime()
+            target_dt = QDateTime(now.date(), prompt_time)
+            
+            # If time has passed for today, schedule for tomorrow
+            if target_dt <= now:
+                target_dt = target_dt.addDays(1)
+            
+            interval_ms = now.msecsTo(target_dt)
+        
+        timer = QTimer()
+        timer.setSingleShot(True) # Use single shot and reschedule to match pattern
+        timer.timeout.connect(lambda: self.trigger_frequency_prompt(alert_index))
+        timer.start(interval_ms)
+        self.frequency_timers[alert_index] = timer
+
+    def trigger_frequency_prompt(self, alert_index):
+        if not (0 <= alert_index < len(self.alerts)): return
+        alert_data = self.alerts[alert_index]
+        fp_data = alert_data.get('frequency_prompt', {})
+        
+        print(f"Triggering frequency prompt for alert {alert_index}")
+        
+        # Show Dialog
+
+        dialog = FrequencyPromptDialog(fp_data.get('question', ''), fp_data.get('options', []), self)
+        
+        # Determine schedule for next time
+        next_prompt_dt = None
+        
+        if dialog.exec_() == QDialog.Accepted:
+            if dialog.selected_interval is not None:
+                print(f"User selected new interval: {dialog.selected_interval}")
+                self.update_alert_interval(alert_index, dialog.selected_interval)
+            
+            if dialog.next_prompt_time and dialog.next_prompt_time.isValid():
+                next_prompt_dt = dialog.next_prompt_time
+                print(f"User scheduled next prompt at: {next_prompt_dt.toString()}")
+        
+        # Reschedule next prompt
+
+        self.schedule_frequency_timer(alert_data, alert_index, target_datetime=next_prompt_dt)
+
+    def update_alert_interval(self, alert_index, new_interval_mins):
+        if not (0 <= alert_index < len(self.alerts)): return
+        
+        print(f"Updating alert {alert_index} interval to {new_interval_mins} mins")
+        self.alerts[alert_index]['interval_value'] = new_interval_mins
+        
+
+        current_mode = self.alerts[alert_index].get('repeat')
+        if current_mode not in ["Every X Minutes", "Every X Hours"]:
+            self.alerts[alert_index]['repeat'] = "Every X Minutes"
+            
+
+        self.schedule_alert_timer(self.alerts[alert_index], alert_index)
+        
+        self.update_alert_table()
+        self.save_alerts()
 
     def _schedule_single_alert_instance(self, alert_data, is_temporary=False):
          """Schedules a one-off timer, typically for delayed alerts."""
