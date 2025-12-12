@@ -1579,6 +1579,7 @@ if __name__ == "__main__":
     app.setApplicationName("GentleAlertScheduler")
     app.setOrganizationName("YourOrg") # Optional
     app.setApplicationVersion("1.7") # Incremented version for new feature
+    app.setQuitOnLastWindowClosed(False) # Keep app running when minimized/hidden
 
     # Ensure config directory exists before creating window
     get_config_dir()
