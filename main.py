@@ -1188,6 +1188,7 @@ class MainWindow(QMainWindow):
         if alert_index in self.alert_timers:
             timer = self.alert_timers.pop(alert_index)
             timer.stop()
+        self.stop_frequency_timer(alert_index)
 
     def stop_frequency_timer(self, alert_index):
         if alert_index in self.frequency_timers:
@@ -1249,6 +1250,9 @@ class MainWindow(QMainWindow):
     def schedule_frequency_timer(self, alert_data, alert_index, target_datetime=None):
         self.stop_frequency_timer(alert_index)
         
+        if not alert_data.get('enabled', True):
+            return
+
         fp_data = alert_data.get('frequency_prompt', {})
         if not fp_data.get('enabled', False):
             return
@@ -1281,6 +1285,10 @@ class MainWindow(QMainWindow):
     def trigger_frequency_prompt(self, alert_index):
         if not (0 <= alert_index < len(self.alerts)): return
         alert_data = self.alerts[alert_index]
+        
+        if not alert_data.get('enabled', True):
+            return
+
         fp_data = alert_data.get('frequency_prompt', {})
         
         print(f"Triggering frequency prompt for alert {alert_index}")
