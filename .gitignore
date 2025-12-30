@@ -138,3 +138,11 @@ dmypy.json
 
 # Cython debug symbols
 cython_debug/
+
+# Google Tasks API Credentials
+credentials.json
+token.json
+
+# Local Sync Tools
+sync_google_tasks.pyw
+

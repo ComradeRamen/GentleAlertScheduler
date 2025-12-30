@@ -10,7 +10,7 @@ from PyQt5.QtWidgets import (
     QColorDialog, QSpinBox, QFormLayout, QDoubleSpinBox, QSystemTrayIcon,
     QMenu, QAction, QStyle, QGridLayout, QDateTimeEdit, QGroupBox
 )
-from PyQt5.QtCore import Qt, QTime, QDate, QDateTime, QTimer, QSize, pyqtSignal
+from PyQt5.QtCore import Qt, QTime, QDate, QDateTime, QTimer, QSize, pyqtSignal, QFileSystemWatcher
 from PyQt5.QtGui import QPainter, QColor, QFont, QIcon
 import ctypes
 from ctypes import wintypes
@@ -708,6 +708,19 @@ class MainWindow(QMainWindow):
         self.settings = self.load_settings()
         self.load_alerts() # Loads alerts and sets initial timers
 
+        # File Watcher for automatic reloading
+        self.file_watcher = QFileSystemWatcher(self)
+        alerts_path = get_config_path('alerts.json')
+        if alerts_path.exists():
+             self.file_watcher.addPath(str(alerts_path))
+        self.file_watcher.fileChanged.connect(self.on_alerts_file_changed)
+        
+        # Debounce timer for file reload (to avoid partial reads during writes)
+        self.reload_debounce_timer = QTimer(self)
+        self.reload_debounce_timer.setSingleShot(True)
+        self.reload_debounce_timer.setInterval(500) # 500ms wait
+        self.reload_debounce_timer.timeout.connect(self.reload_alerts_debounced)
+
         # System Tray
         self.create_tray_icon()
         self.tray_icon.showMessage("Gentle Alert Scheduler", "Application started.", QSystemTrayIcon.Information, 3000)
@@ -1102,6 +1115,23 @@ class MainWindow(QMainWindow):
 
         self.update_alert_table()
         print(f"Loaded {len(self.alerts)} alerts.")
+
+    def on_alerts_file_changed(self, path):
+         print(f"Configuration file changed: {path}")
+         # Restart debounce timer
+         self.reload_debounce_timer.start()
+
+    def reload_alerts_debounced(self):
+         print("Reloading alerts from file...")
+         # Re-add path to watcher if it was deleted/recreated (editors do this safely)
+         alerts_path = get_config_path('alerts.json')
+         if alerts_path.exists():
+             if str(alerts_path) not in self.file_watcher.files():
+                  self.file_watcher.addPath(str(alerts_path))
+                  
+         self.load_alerts()
+         self.tray_icon.showMessage("Configuration Updated", "Alerts have been reloaded from disk.", QSystemTrayIcon.Information, 2000)
+
 
     def save_alerts(self):
         alerts_path = get_config_path('alerts.json')
