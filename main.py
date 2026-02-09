@@ -90,6 +90,83 @@ def press_windows_key():
     except Exception as e:
         print(f"Failed to press Windows Key: {e}")
 
+def _get_process_name_from_pid(pid):
+    """Gets the process executable name from a PID using ctypes."""
+    if sys.platform != "win32":
+        return None
+    try:
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        kernel32 = ctypes.windll.kernel32
+        
+        h_process = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not h_process:
+            return None
+        
+        try:
+            # QueryFullProcessImageNameW
+            buffer = ctypes.create_unicode_buffer(512)
+            size = ctypes.c_ulong(512)
+            if kernel32.QueryFullProcessImageNameW(h_process, 0, buffer, ctypes.byref(size)):
+                full_path = buffer.value
+                # Extract just the filename
+                return os.path.basename(full_path)
+        finally:
+            kernel32.CloseHandle(h_process)
+    except Exception:
+        pass
+    return None
+
+def get_open_windows():
+    """Returns list of (hwnd, process_name, window_title) for visible windows using ctypes."""
+    if sys.platform != "win32":
+        return []
+    
+    user32 = ctypes.windll.user32
+    windows = []
+    
+    # Define callback type
+    WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int))
+    
+    def enum_callback(hwnd, _):
+        if user32.IsWindowVisible(hwnd):
+            # Get window title
+            length = user32.GetWindowTextLengthW(hwnd)
+            if length > 0:
+                buffer = ctypes.create_unicode_buffer(length + 1)
+                user32.GetWindowTextW(hwnd, buffer, length + 1)
+                title = buffer.value
+                
+                # Get PID
+                pid = ctypes.c_ulong()
+                user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+                
+                # Get process name
+                proc_name = _get_process_name_from_pid(pid.value)
+                if proc_name:
+                    windows.append((hwnd, proc_name, title))
+        return True
+    
+    try:
+        user32.EnumWindows(WNDENUMPROC(enum_callback), 0)
+    except Exception as e:
+        print(f"Error enumerating windows: {e}")
+    return windows
+
+def get_focused_app():
+    """Returns the process name of the currently focused window using ctypes, or None."""
+    if sys.platform != "win32":
+        return None
+    try:
+        user32 = ctypes.windll.user32
+        hwnd = user32.GetForegroundWindow()
+        if hwnd:
+            pid = ctypes.c_ulong()
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            return _get_process_name_from_pid(pid.value)
+    except Exception as e:
+        print(f"Error getting focused app: {e}")
+    return None
+
 # --- Transparent Overlay Class ---
 
 class TransparentOverlay(QWidget):
@@ -309,6 +386,55 @@ class AddAlertDialog(QDialog):
         self.fullscreen_fallback_cb.setChecked(edit_data.get('fullscreen_fallback', self.default_settings.get('default_fullscreen_fallback', True)))
         self.form_layout.addRow("Fullscreen Behavior:", self.fullscreen_fallback_cb)
 
+        # --- Wait For App Settings ---
+        self.wait_for_app_cb = QCheckBox("Wait for specific app to be focused")
+        self.wait_for_app_cb.setChecked(edit_data.get('wait_for_app_enabled', False))
+        self.wait_for_app_cb.stateChanged.connect(self.toggle_alert_wait_for_app)
+        self.form_layout.addRow("Wait For App:", self.wait_for_app_cb)
+
+        # App dropdown with refresh
+        wait_app_layout = QHBoxLayout()
+        self.wait_for_app_combo = QComboBox()
+        default_app = self.default_settings.get('default_wait_for_app', '')
+        self.use_default_app_label = f"(Use Default: {default_app})" if default_app else "(Use Default: None)"
+        self.wait_for_app_combo.addItem(self.use_default_app_label)
+        self.refresh_alert_wait_app_combo()
+        saved_app = edit_data.get('wait_for_app', '')
+        if saved_app:
+            idx = self.wait_for_app_combo.findText(saved_app)
+            if idx >= 0: self.wait_for_app_combo.setCurrentIndex(idx)
+        wait_app_layout.addWidget(self.wait_for_app_combo)
+        refresh_btn = QPushButton("Refresh")
+        refresh_btn.clicked.connect(self.refresh_alert_wait_app_combo)
+        wait_app_layout.addWidget(refresh_btn)
+        self.alert_wait_app_widget = QWidget()
+        self.alert_wait_app_widget.setLayout(wait_app_layout)
+        self.form_layout.addRow("Target App:", self.alert_wait_app_widget)
+
+        # Timeout
+        self.wait_timeout_edit = QSpinBox()
+        self.wait_timeout_edit.setRange(0, 1440)
+        self.wait_timeout_edit.setValue(edit_data.get('wait_for_app_timeout', self.default_settings.get('default_wait_for_app_timeout', 0)))
+        self.wait_timeout_edit.setSpecialValueText("Forever")
+        self.form_layout.addRow("Timeout (minutes):", self.wait_timeout_edit)
+
+        # On Timeout behavior
+        self.on_timeout_combo = QComboBox()
+        default_on_timeout = self.default_settings.get('default_wait_for_app_on_timeout', 'Trigger Anyway')
+        use_default_timeout_label = f"(Use Default: {default_on_timeout})"
+        self.on_timeout_combo.addItems([use_default_timeout_label, "Trigger Anyway", "Skip Alert"])
+        saved_on_timeout = edit_data.get('wait_for_app_on_timeout', '')
+        if saved_on_timeout:
+            idx = self.on_timeout_combo.findText(saved_on_timeout)
+            if idx >= 0: self.on_timeout_combo.setCurrentIndex(idx)
+        self.form_layout.addRow("On Timeout:", self.on_timeout_combo)
+
+        # Store labels for toggling
+        self.alert_wait_app_label = self.form_layout.labelForField(self.alert_wait_app_widget)
+        self.alert_wait_timeout_label = self.form_layout.labelForField(self.wait_timeout_edit)
+        self.alert_on_timeout_label = self.form_layout.labelForField(self.on_timeout_combo)
+        self.toggle_alert_wait_for_app()
+
         # --- Frequency Prompt Configuration ---
         self.fp_group = QGroupBox("Dynamic Frequency Prompt")
         self.fp_group.setCheckable(True)
@@ -438,6 +564,30 @@ class AddAlertDialog(QDialog):
         if color.isValid():
             self.text_color = (color.red(), color.green(), color.blue())
             self.update_color_button_style(self.text_color_button, self.text_color)
+
+    def toggle_alert_wait_for_app(self):
+        enabled = self.wait_for_app_cb.isChecked()
+        self.alert_wait_app_widget.setVisible(enabled)
+        self.wait_timeout_edit.setVisible(enabled)
+        self.on_timeout_combo.setVisible(enabled)
+        if self.alert_wait_app_label: self.alert_wait_app_label.setVisible(enabled)
+        if self.alert_wait_timeout_label: self.alert_wait_timeout_label.setVisible(enabled)
+        if self.alert_on_timeout_label: self.alert_on_timeout_label.setVisible(enabled)
+
+    def refresh_alert_wait_app_combo(self):
+        current = self.wait_for_app_combo.currentText()
+        self.wait_for_app_combo.clear()
+        self.wait_for_app_combo.addItem(self.use_default_app_label)
+        windows = get_open_windows()
+        seen = set()
+        for _, proc_name, title in windows:
+            if proc_name not in seen:
+                seen.add(proc_name)
+                self.wait_for_app_combo.addItem(proc_name)
+        # Restore previous selection if still available
+        if current:
+            idx = self.wait_for_app_combo.findText(current)
+            if idx >= 0: self.wait_for_app_combo.setCurrentIndex(idx)
             
     def get_current_base_interval(self):
         # Return the raw value visible in the spinner
@@ -462,6 +612,10 @@ class AddAlertDialog(QDialog):
             'overlay_color': self.overlay_color,
             'text_color': self.text_color,
             'fullscreen_fallback': self.fullscreen_fallback_cb.isChecked(),
+            'wait_for_app_enabled': self.wait_for_app_cb.isChecked(),
+            'wait_for_app': self.wait_for_app_combo.currentText() if self.wait_for_app_cb.isChecked() and not self.wait_for_app_combo.currentText().startswith("(Use Default") else '',
+            'wait_for_app_timeout': self.wait_timeout_edit.value() if self.wait_for_app_cb.isChecked() else 0,
+            'wait_for_app_on_timeout': self.on_timeout_combo.currentText() if self.wait_for_app_cb.isChecked() and not self.on_timeout_combo.currentText().startswith("(Use Default") else '',
         }
         
         if self.fp_group.isChecked():
@@ -620,6 +774,40 @@ class SettingsDialog(QDialog):
         self.default_fullscreen_fallback_cb.setChecked(self.settings.get('default_fullscreen_fallback', True))
         form_layout.addRow("Default Fullscreen Behavior:", self.default_fullscreen_fallback_cb)
 
+        # --- Wait For App Settings ---
+        self.default_wait_for_app_cb = QCheckBox("Enable Wait For App")
+        self.default_wait_for_app_cb.setChecked(self.settings.get('default_wait_for_app_enabled', False))
+        form_layout.addRow("Default Wait For App:", self.default_wait_for_app_cb)
+
+        # App dropdown with refresh
+        wait_app_layout = QHBoxLayout()
+        self.default_wait_for_app_combo = QComboBox()
+        self.refresh_wait_app_combo()
+        saved_app = self.settings.get('default_wait_for_app', '')
+        if saved_app:
+            idx = self.default_wait_for_app_combo.findText(saved_app)
+            if idx >= 0: self.default_wait_for_app_combo.setCurrentIndex(idx)
+        wait_app_layout.addWidget(self.default_wait_for_app_combo)
+        refresh_btn = QPushButton("Refresh")
+        refresh_btn.clicked.connect(self.refresh_wait_app_combo)
+        wait_app_layout.addWidget(refresh_btn)
+        wait_app_widget = QWidget()
+        wait_app_widget.setLayout(wait_app_layout)
+        form_layout.addRow("Default Target App:", wait_app_widget)
+
+        # Timeout
+        self.default_wait_timeout_edit = QSpinBox()
+        self.default_wait_timeout_edit.setRange(0, 1440)
+        self.default_wait_timeout_edit.setValue(self.settings.get('default_wait_for_app_timeout', 0))
+        self.default_wait_timeout_edit.setSpecialValueText("Forever")
+        form_layout.addRow("Default Timeout (minutes):", self.default_wait_timeout_edit)
+
+        # On Timeout behavior
+        self.default_on_timeout_combo = QComboBox()
+        self.default_on_timeout_combo.addItems(["Trigger Anyway", "Skip Alert"])
+        self.default_on_timeout_combo.setCurrentText(self.settings.get('default_wait_for_app_on_timeout', 'Trigger Anyway'))
+        form_layout.addRow("Default On Timeout:", self.default_on_timeout_combo)
+
         self.layout.addLayout(form_layout)
 
         # Buttons
@@ -665,7 +853,26 @@ class SettingsDialog(QDialog):
             'default_start_corner': self.default_start_corner_combo.currentText(),
             'max_pixels_per_step': self.max_pixels_per_step_edit.value(),
             'default_fullscreen_fallback': self.default_fullscreen_fallback_cb.isChecked(),
+            'default_wait_for_app_enabled': self.default_wait_for_app_cb.isChecked(),
+            'default_wait_for_app': self.default_wait_for_app_combo.currentText(),
+            'default_wait_for_app_timeout': self.default_wait_timeout_edit.value(),
+            'default_wait_for_app_on_timeout': self.default_on_timeout_combo.currentText(),
         }
+
+
+    def refresh_wait_app_combo(self):
+        current = self.default_wait_for_app_combo.currentText()
+        self.default_wait_for_app_combo.clear()
+        windows = get_open_windows()
+        seen = set()
+        for _, proc_name, title in windows:
+            if proc_name not in seen:
+                seen.add(proc_name)
+                self.default_wait_for_app_combo.addItem(proc_name)
+        # Restore previous selection if still available
+        if current:
+            idx = self.default_wait_for_app_combo.findText(current)
+            if idx >= 0: self.default_wait_for_app_combo.setCurrentIndex(idx)
 # --- Main Window Class ---
 
 class MainWindow(QMainWindow):
@@ -703,6 +910,12 @@ class MainWindow(QMainWindow):
         self.alert_timers = {} # {alert_index: QTimer} for regular scheduled alerts
         self.frequency_timers = {} # {alert_index: QTimer} for frequency prompts
         self.temporary_timers = set()
+        
+        # Pending focus alerts queue: list of (alert_data, alert_index, queued_datetime)
+        self.pending_focus_alerts = []
+        self.focus_poll_timer = QTimer(self)
+        self.focus_poll_timer.timeout.connect(self.check_pending_focus_alerts)
+        self.focus_poll_timer.setInterval(500)  # Poll every 500ms
 
         # Load settings and alerts
         self.settings = self.load_settings()
@@ -1167,6 +1380,10 @@ class MainWindow(QMainWindow):
             'default_start_corner': 'Top-Right',
             'max_pixels_per_step': 50,
             'default_fullscreen_fallback': True,
+            'default_wait_for_app_enabled': False,
+            'default_wait_for_app': '',
+            'default_wait_for_app_timeout': 0,
+            'default_wait_for_app_on_timeout': 'Trigger Anyway',
         }
         if settings_path.exists():
             try:
@@ -1482,34 +1699,117 @@ class MainWindow(QMainWindow):
 
     def trigger_alert(self, alert_data, alert_index):
         """Handles the logic when an alert timer (regular or temporary) fires."""
+        # Determine effective alert config
         if alert_index == -1:
             # Temporary/delayed alert
-            print(f"Triggering temporary/delayed alert: {alert_data.get('text', 'No Text')}")
-            self.show_alert_overlay(alert_data)
+            effective_data = alert_data
         else:
-            # Regular alert
-             if not (0 <= alert_index < len(self.alerts)):
-                 print(f"Skipping trigger for alert index {alert_index} (alert removed).")
-                 self.stop_alert_timer(alert_index)
-                 return
-             current_alert_config = self.alerts[alert_index]
-             if not current_alert_config.get('enabled', True):
-                 print(f"Skipping trigger for alert {alert_index} (disabled).")
-                 self.stop_alert_timer(alert_index)
-                 return
-
-             print(f"Triggering alert (Index: {alert_index}): {current_alert_config.get('text', 'No Text')}")
-             self.show_alert_overlay(current_alert_config)
-
-             # Reschedule or Disable
-             if current_alert_config.get('repeat', 'No Repeat') == 'No Repeat':
-                 print(f"Disabling non-repeating alert {alert_index} after triggering.")
-                 self.alerts[alert_index]['enabled'] = False
-                 self.stop_alert_timer(alert_index)
-                 self.update_alert_table()
-                 self.save_alerts()
-             else:
-                 self.schedule_alert_timer(current_alert_config, alert_index)
+            if not (0 <= alert_index < len(self.alerts)):
+                print(f"Skipping trigger for alert index {alert_index} (alert removed).")
+                self.stop_alert_timer(alert_index)
+                return
+            effective_data = self.alerts[alert_index]
+            if not effective_data.get('enabled', True):
+                print(f"Skipping trigger for alert {alert_index} (disabled).")
+                self.stop_alert_timer(alert_index)
+                return
+        
+        # Check for wait-for-app setting (defaults to False if not set)
+        wait_enabled = effective_data.get('wait_for_app_enabled', False)
+        
+        if wait_enabled:
+            # Determine target app
+            target_app = effective_data.get('wait_for_app', '')
+            if not target_app or target_app == '(Use Default)':
+                target_app = self.settings.get('default_wait_for_app', '')
+            
+            if target_app:
+                focused_app = get_focused_app()
+                if focused_app != target_app:
+                    # Queue the alert for later
+                    print(f"Alert queued - waiting for '{target_app}' (current: '{focused_app}')")
+                    self.pending_focus_alerts.append((effective_data, alert_index, QDateTime.currentDateTime()))
+                    if not self.focus_poll_timer.isActive():
+                        self.focus_poll_timer.start()
+                    
+                    # Handle rescheduling for repeating alerts
+                    if alert_index != -1 and effective_data.get('repeat', 'No Repeat') != 'No Repeat':
+                        self.schedule_alert_timer(effective_data, alert_index)
+                    return
+        
+        # Actually show the alert
+        self._execute_alert_display(effective_data, alert_index)
+    
+    def _execute_alert_display(self, alert_data, alert_index):
+        """Actually displays the alert overlay and handles rescheduling."""
+        if alert_index == -1:
+            print(f"Triggering temporary/delayed alert: {alert_data.get('text', 'No Text')}")
+        else:
+            print(f"Triggering alert (Index: {alert_index}): {alert_data.get('text', 'No Text')}")
+        
+        self.show_alert_overlay(alert_data)
+        
+        # Reschedule or disable (only for regular alerts)
+        if alert_index != -1:
+            if alert_data.get('repeat', 'No Repeat') == 'No Repeat':
+                print(f"Disabling non-repeating alert {alert_index} after triggering.")
+                self.alerts[alert_index]['enabled'] = False
+                self.stop_alert_timer(alert_index)
+                self.update_alert_table()
+                self.save_alerts()
+            else:
+                self.schedule_alert_timer(alert_data, alert_index)
+    
+    def check_pending_focus_alerts(self):
+        """Checks if any pending alerts can now be triggered based on app focus."""
+        if not self.pending_focus_alerts:
+            self.focus_poll_timer.stop()
+            return
+        
+        focused_app = get_focused_app()
+        triggered = []
+        
+        for i, (alert_data, alert_index, queued_time) in enumerate(self.pending_focus_alerts):
+            # Determine target app
+            target_app = alert_data.get('wait_for_app', '')
+            if not target_app or target_app == '(Use Default)':
+                target_app = self.settings.get('default_wait_for_app', '')
+            
+            # Check if app matches
+            if focused_app == target_app:
+                print(f"Target app '{target_app}' focused - triggering queued alert")
+                self._execute_alert_display(alert_data, alert_index)
+                triggered.append(i)
+                continue
+            
+            # Check timeout
+            timeout_mins = alert_data.get('wait_for_app_timeout', 0)
+            if timeout_mins == 0:
+                timeout_mins = self.settings.get('default_wait_for_app_timeout', 0)
+            
+            if timeout_mins > 0:
+                elapsed_ms = queued_time.msecsTo(QDateTime.currentDateTime())
+                if elapsed_ms >= timeout_mins * 60 * 1000:
+                    # Timeout reached - check behavior
+                    on_timeout = alert_data.get('wait_for_app_on_timeout', '')
+                    if not on_timeout or on_timeout == '(Use Default)':
+                        on_timeout = self.settings.get('default_wait_for_app_on_timeout', 'Trigger Anyway')
+                    
+                    if on_timeout == 'Trigger Anyway':
+                        print(f"Timeout reached for alert - triggering anyway")
+                        self._execute_alert_display(alert_data, alert_index)
+                    else:
+                        print(f"Timeout reached for alert - skipping ('{on_timeout}')")
+                    
+                    triggered.append(i)
+        
+        # Remove triggered alerts (in reverse order to maintain indices)
+        for i in reversed(triggered):
+            self.pending_focus_alerts.pop(i)
+        
+        # Stop timer if queue is empty
+        if not self.pending_focus_alerts:
+            self.focus_poll_timer.stop()
 
     # --- Overlay Display and Control ---
     def show_alert_overlay(self, alert_data):
